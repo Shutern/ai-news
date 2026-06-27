@@ -16,11 +16,14 @@ AIニュースまとめアプリ（第1段階：APIなし・GitHubなし）
 """
 
 import html
+import json
 import os
 import re
+import struct
 import sys
 import urllib.parse
 import urllib.request
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -29,7 +32,10 @@ from xml.etree import ElementTree as ET
 # ---- 設定 -------------------------------------------------------------
 HERE = os.path.dirname(os.path.abspath(__file__))
 FEEDS_FILE = os.path.join(HERE, "feeds.txt")
-OUTPUT_HTML = os.path.join(HERE, "output", "index.html")
+OUTPUT_DIR = os.path.join(HERE, "output")
+OUTPUT_HTML = os.path.join(OUTPUT_DIR, "index.html")
+ICON_PATH = os.path.join(OUTPUT_DIR, "icon.png")
+MANIFEST_PATH = os.path.join(OUTPUT_DIR, "manifest.json")
 
 MAX_ITEMS = 120         # 全体で表示する最大記事数
 MAX_PER_FEED = 15       # 1ソースあたりの取り込み上限
@@ -403,6 +409,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#ffffff">
 <title>AIニュースまとめ</title>
+<link rel="apple-touch-icon" href="icon.png">
+<link rel="icon" type="image/png" href="icon.png">
+<link rel="manifest" href="manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="AIニュース">
 <style>
   :root{
     --bg:#f6f7f9; --card:#ffffff; --card-h:#f1f3f6; --text:#1a1d24;
@@ -597,13 +609,85 @@ def collect_articles(verbose=False):
     return final, ok, failed
 
 
+# ---- アプリアイコン生成（ホーム画面用・標準ライブラリのみでPNG出力） ----
+def _png(width, height, px):
+    """RGBAバイト列(px)から最小構成のPNGバイト列を作る。"""
+    raw = bytearray()
+    stride = width * 4
+    for y in range(height):
+        raw.append(0)                       # 各行のフィルタ種別=0
+        raw.extend(px[y * stride:(y + 1) * stride])
+
+    def chunk(typ, data):
+        return (struct.pack(">I", len(data)) + typ + data
+                + struct.pack(">I", zlib.crc32(typ + data) & 0xffffffff))
+
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(bytes(raw), 9))
+            + chunk(b"IEND", b""))
+
+
+def make_app_icon(size=192):
+    """ニュースフィードを表す簡潔なアプリアイコン（青地＋白カード＋3行）。"""
+    px = bytearray(size * size * 4)
+
+    def put(x, y, c):
+        if 0 <= x < size and 0 <= y < size:
+            i = (y * size + x) * 4
+            px[i], px[i + 1], px[i + 2], px[i + 3] = c[0], c[1], c[2], 255
+
+    def rrect(x0, y0, x1, y1, rad, c):
+        for y in range(y0, y1):
+            for x in range(x0, x1):
+                cx = min(max(x, x0 + rad), x1 - 1 - rad)
+                cy = min(max(y, y0 + rad), y1 - 1 - rad)
+                if (x - cx) ** 2 + (y - cy) ** 2 <= rad * rad:
+                    put(x, y, c)
+
+    def disc(cx, cy, r, c):
+        for y in range(cy - r, cy + r + 1):
+            for x in range(cx - r, cx + r + 1):
+                if (x - cx) ** 2 + (y - cy) ** 2 <= r * r:
+                    put(x, y, c)
+
+    BLUE, WHITE, BAR, RED = (47, 111, 222), (255, 255, 255), (150, 163, 184), (226, 75, 74)
+    s = size / 192.0
+
+    def S(v):
+        return int(round(v * s))
+
+    rrect(0, 0, size, size, 0, BLUE)                 # 背景（角はOSが丸める）
+    rrect(S(34), S(40), S(158), S(152), S(22), WHITE)  # 白いニュースカード
+    for i, cy in enumerate((S(68), S(96), S(124))):    # 3行（左にドット＋バー）
+        disc(S(52), cy, S(7), RED if i == 0 else BLUE)
+        rrect(S(66), cy - S(6), S(146), cy + S(6), S(6), BAR)
+    return _png(size, size, px)
+
+
+def write_static_assets():
+    """ホーム画面アイコンとマニフェストを output/ に書き出す。"""
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    with open(ICON_PATH, "wb") as f:
+        f.write(make_app_icon(192))
+    manifest = {
+        "name": "AIニュースまとめ", "short_name": "AIニュース",
+        "start_url": ".", "display": "standalone",
+        "background_color": "#f6f7f9", "theme_color": "#ffffff",
+        "icons": [{"src": "icon.png", "sizes": "192x192", "type": "image/png"}],
+    }
+    with open(MANIFEST_PATH, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+
+
 # ---- メイン（バッチ：HTMLファイルを書き出す） --------------------------
 def main():
     articles, ok, failed = collect_articles(verbose=True)
 
-    os.makedirs(os.path.dirname(OUTPUT_HTML), exist_ok=True)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
     with open(OUTPUT_HTML, "w", encoding="utf-8") as f:
         f.write(render_html(articles, ok, failed))
+    write_static_assets()  # ホーム画面アイコン・マニフェスト
 
     print(f"\n完成: {OUTPUT_HTML}")
     print(f"記事 {len(articles)}件 / 成功 {ok}ソース / 失敗 {len(failed)}ソース")
