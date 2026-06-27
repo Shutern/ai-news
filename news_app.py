@@ -257,10 +257,111 @@ def make_summary(title, raw_summary):
     return text
 
 
+# ---- 重要度スコアリング（銀行での活用を重視） --------------------------
+# 銀行業務に直結するテーマ。マッチするとタグ表示にも使う。
+BANK_THEMES = {
+    "業務効率化": ["業務効率", "バックオフィス", "議事録", "文字起こし", "コールセンター",
+        "問い合わせ", "エージェント", "自動化", "rpa", "内製", "効率化", "省力化"],
+    "リスク・不正": ["不正検知", "不正利用", "マネロン", "aml", "kyc", "本人確認",
+        "リスク管理", "与信", "審査", "詐欺", "なりすまし"],
+    "コンプラ・規制": ["規制", "金融庁", "コンプライアンス", "ガバナンス", "監査", "法規制"],
+    "営業・提案": ["営業支援", "提案書", "顧客対応", "パーソナライズ", "レコメンド", "渉外"],
+    "セキュリティ": ["セキュリティ", "サイバー", "個人情報", "プライバシー", "オンプレ",
+        "セキュア", "情報漏えい", "情報漏洩", "データ主権"],
+    "文書・ナレッジ": ["契約書", "稟議", "ocr", "rag", "社内文書", "ナレッジ", "文書検索",
+        "マニュアル"],
+    "基盤モデル": ["gpt-5", "gpt5", "claude", "gemini", "新モデル", "大規模言語モデル", "llm"],
+}
+THEME_WEIGHT = {"基盤モデル": 1}  # 既定は2、基盤モデルだけ控えめ
+DEFAULT_THEME_WEIGHT = 2
+FINANCE_SOURCE_BONUS = 4         # 金融カテゴリのソースは無条件で加点
+
+# 一般的な重要語（大ニュースの兆候）
+GENERAL_KW = ["発表", "提携", "買収", "資金調達", "兆円", "億円", "国内初", "初の", "導入"]
+TIER_BONUS = {"主要ラボ": 2, "メディア": 1, "研究": -2}
+
+# 銀行と無関係＝重要度を下げる語
+NOISE_KW = ["ゲーム", "スマートグラス", "スピーカー", "イヤホン", "家電", "映画", "音楽",
+    "アニメ", "スポーツ", "セール", "お買い得", "レビュー", "開封", "福袋", "値下げ",
+    "クーポン", "%off", "オフサイド"]
+
+# 複数社報道（コラボレーション）を測る固有名詞
+CORROBORATION_ENTITIES = ["openai", "anthropic", "google", "gpt", "gemini", "claude",
+    "microsoft", "deepmind", "nvidia", "メガバンク", "三菱ufj", "mufg", "三井住友",
+    "smbc", "みずほ", "nttデータ"]
+
+HIGH_CUT = 8   # このスコア以上＝重要度「高」
+MID_CUT = 3    # このスコア以上＝「中」、未満＝「低」
+
+
+def _kw_in(text, kw):
+    """英数字キーワードは単語境界で、日本語は部分一致で判定（text は小文字前提）。"""
+    if kw.isascii():
+        return re.search(r"(?<![a-z0-9])" + re.escape(kw) + r"(?![a-z0-9])", text) is not None
+    return kw in text
+
+
+def annotate_importance(articles):
+    """各記事に score / importance(高中低) / themes を付与する。"""
+    texts = [(a["title"] + " " + a.get("summary", "")).lower() for a in articles]
+
+    # 固有名詞ごとに「何社が報じているか」を集計
+    entity_sources = {}
+    for a, t in zip(articles, texts):
+        for ent in CORROBORATION_ENTITIES:
+            if _kw_in(t, ent):
+                entity_sources.setdefault(ent, set()).add(a["source"])
+
+    for a, t in zip(articles, texts):
+        # 銀行活用度
+        bank, themes = 0.0, []
+        for theme, kws in BANK_THEMES.items():
+            if any(_kw_in(t, kw) for kw in kws):
+                themes.append(theme)
+                bank += THEME_WEIGHT.get(theme, DEFAULT_THEME_WEIGHT)
+        if a["category"] == "金融":
+            bank += FINANCE_SOURCE_BONUS
+        # 一般重要度
+        gen = sum(1 for kw in GENERAL_KW if _kw_in(t, kw))
+        gen += TIER_BONUS.get(a["category"], 0)
+        if any(_kw_in(t, e) and len(entity_sources.get(e, ())) >= 3
+               for e in CORROBORATION_ENTITIES):
+            gen += 2  # 3社以上が報じている話題
+        # ノイズ減点
+        noise = min(sum(1 for kw in NOISE_KW if _kw_in(t, kw)), 3) * 2
+        if a["category"] == "研究" and bank == 0:
+            noise += 2  # 銀行に無関係なarXiv個別論文
+        # 合計：銀行活用度を2倍で重視
+        score = bank * 2 + gen - noise
+        a["score"] = score
+        a["bank"] = bank
+        a["themes"] = themes[:2]
+        a["importance"] = "高" if score >= HIGH_CUT else ("中" if score >= MID_CUT else "低")
+    return articles
+
+
 # ---- HTML生成（白基調・分野バッジ・フィルタ付き） ----------------------
 def badge_style(category):
     bg, fg = CATEGORY_STYLE.get(category, CATEGORY_STYLE[DEFAULT_CATEGORY])
     return bg, fg
+
+
+# 重要度バッジの色（高＝赤、中＝琥珀、低＝表示しない）
+IMPORTANCE_STYLE = {"高": ("#FCEBEB", "#A32D2D", "重要"), "中": ("#FAEEDA", "#854F0B", "注目")}
+
+
+def importance_badge(imp):
+    if imp not in IMPORTANCE_STYLE:
+        return ""
+    bg, fg, label = IMPORTANCE_STYLE[imp]
+    return f'<span class="badge imp" style="background:{bg};color:{fg}">{label}</span>'
+
+
+def theme_tags(themes):
+    if not themes:
+        return ""
+    tags = "".join(f'<span class="tag">{html.escape(t)}</span>' for t in themes)
+    return f'<div class="tags">{tags}</div>'
 
 
 def render_card(a):
@@ -272,19 +373,33 @@ def render_card(a):
     )
     cat = html.escape(a["category"])
     return (
-        f'<a class="card" data-cat="{cat}" href="{html.escape(a["link"])}" '
-        f'target="_blank" rel="noopener">'
+        f'<a class="card" data-cat="{cat}" data-imp="{a["importance"]}" '
+        f'href="{html.escape(a["link"])}" target="_blank" rel="noopener">'
         f'<div class="cardhead">'
+        f'{importance_badge(a["importance"])}'
         f'<span class="badge" style="background:{bg};color:{fg}">{cat}</span>'
         f'<span class="meta">{meta}</span></div>'
         f'<div class="title">{html.escape(a["title"])}</div>'
+        f'{theme_tags(a["themes"])}'
         f'{summary_html}</a>'
+    )
+
+
+def render_highlight(a):
+    rel = relative_time(a["date"])
+    meta = html.escape(a["source"]) + (f" ・ {html.escape(rel)}" if rel else "")
+    return (
+        f'<a class="hl" href="{html.escape(a["link"])}" target="_blank" rel="noopener">'
+        f'<div class="hl-head">{importance_badge(a["importance"])}{theme_tags(a["themes"])}</div>'
+        f'<div class="hl-title">{html.escape(a["title"])}</div>'
+        f'<div class="hl-meta">{meta}</div></a>'
     )
 
 
 def render_chips(articles):
     present = [c for c in CATEGORY_STYLE if any(a["category"] == c for a in articles)]
-    chips = ['<button class="chip active" data-filter="all">すべて</button>']
+    chips = ['<button class="chip active" data-filter="all">すべて</button>',
+             '<button class="chip" data-filter="__imp__">🔴 重要だけ</button>']
     for c in present:
         chips.append(f'<button class="chip" data-filter="{html.escape(c)}">{html.escape(c)}</button>')
     return "".join(chips)
@@ -321,12 +436,27 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     transition:background .15s,border-color .15s,transform .05s;}
   .card:active{transform:scale(.99);}
   @media(hover:hover){.card:hover{background:var(--card-h);border-color:#d3d7de;}}
-  .cardhead{display:flex;align-items:center;gap:8px;margin-bottom:6px;}
+  .cardhead{display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap;}
   .badge{font-size:11px;font-weight:600;padding:2px 9px;border-radius:999px;white-space:nowrap;}
   .meta{font-size:12px;color:var(--muted);}
   .title{font-size:16px;font-weight:600;line-height:1.5;}
+  .tags{display:flex;gap:5px;flex-wrap:wrap;margin-top:6px;}
+  .tag{font-size:11px;color:#3b4252;background:#eef0f4;border:1px solid var(--border);
+    border-radius:6px;padding:1px 7px;white-space:nowrap;}
   .summary{font-size:13px;color:var(--muted);margin:6px 0 0;}
   .empty{color:var(--muted);padding:20px;text-align:center;}
+  .hlwrap{max-width:720px;margin:0 auto;padding:14px 12px 0;}
+  .hlhead{font-size:15px;font-weight:600;margin:0 0 8px;display:flex;align-items:center;gap:6px;}
+  .hlgrid{display:grid;gap:10px;}
+  .hl{display:block;text-decoration:none;color:inherit;background:#fffaf5;
+    border:1px solid #f0d9c4;border-radius:12px;padding:12px 14px;}
+  .hl:active{transform:scale(.99);}
+  .hl-head{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:5px;}
+  .hl-head .tags{margin-top:0;}
+  .hl-title{font-size:15px;font-weight:600;line-height:1.45;}
+  .hl-meta{font-size:12px;color:var(--muted);margin-top:4px;}
+  .divider{max-width:720px;margin:18px auto 0;padding:0 12px;font-size:13px;
+    font-weight:600;color:var(--muted);}
   .failed{max-width:720px;margin:16px auto;padding:0 12px;font-size:12px;color:var(--muted);}
   .failed summary{cursor:pointer;}
   footer{text-align:center;color:var(--muted);font-size:11px;margin-top:24px;}
@@ -338,6 +468,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div class="sub">__SUB__</div>
     <div class="chips">__CHIPS__</div>
   </header>
+  __HIGHLIGHTS__
   <main id="results">__CARDS__</main>
   __FAILED__
   <footer>RSSから自動生成 ・ タップで元記事へ</footer>
@@ -348,11 +479,31 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     chips.forEach(x=>x.classList.remove('active'));
     c.classList.add('active');
     const f=c.dataset.filter;
-    cards.forEach(card=>{card.style.display=(f==='all'||card.dataset.cat===f)?'':'none';});
+    cards.forEach(card=>{
+      let show = (f==='all') ? true
+        : (f==='__imp__') ? card.dataset.imp==='高'
+        : card.dataset.cat===f;
+      card.style.display = show ? '' : 'none';
+    });
   }));
 </script>
 </body>
 </html>"""
+
+
+def render_highlights_block(articles):
+    """銀行で効く重要ニュースの上位を「ハイライト枠」として描く。"""
+    top = [a for a in sorted(articles, key=lambda x: -x["score"])
+           if a["importance"] == "高"][:8]
+    if not top:
+        return ""
+    cards = "".join(render_highlight(a) for a in top)
+    return (
+        '<div class="hlwrap">'
+        '<div class="hlhead">🏦 銀行で効くニュース</div>'
+        f'<div class="hlgrid">{cards}</div></div>'
+        '<div class="divider">すべてのニュース</div>'
+    )
 
 
 def render_html(articles, sources_ok, sources_failed):
@@ -367,10 +518,12 @@ def render_html(articles, sources_ok, sources_failed):
             f'<details class="failed"><summary>取得できなかったソース '
             f'({len(sources_failed)})</summary><ul>{items}</ul></details>'
         )
-    sub = f"更新: {generated}　/　{len(articles)}件　/　{sources_ok}ソース"
+    n_high = sum(1 for a in articles if a["importance"] == "高")
+    sub = f"更新: {generated}　/　{len(articles)}件（重要{n_high}）　/　{sources_ok}ソース"
     return (HTML_TEMPLATE
             .replace("__SUB__", html.escape(sub))
             .replace("__CHIPS__", render_chips(articles))
+            .replace("__HIGHLIGHTS__", render_highlights_block(articles))
             .replace("__CARDS__", cards_html)
             .replace("__FAILED__", failed_note))
 
@@ -466,7 +619,9 @@ def collect_articles(verbose=False):
         chosen_links.add(a["link"])
         per_source[a["source"]] = per_source.get(a["source"], 0) + 1
     # ③ 新しい順をベースに、同じソースが連続しないよう散らして見やすく
-    return spread_sources(newest_first(chosen))[:MAX_ITEMS], ok, failed
+    final = spread_sources(newest_first(chosen))[:MAX_ITEMS]
+    annotate_importance(final)  # 重要度スコア・テーマを付与
+    return final, ok, failed
 
 
 # ---- メイン（バッチ：HTMLファイルを書き出す） --------------------------
