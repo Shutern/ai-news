@@ -374,6 +374,7 @@ def render_card(a):
     cat = html.escape(a["category"])
     return (
         f'<a class="card" data-cat="{cat}" data-imp="{a["importance"]}" '
+        f'data-score="{round(a["score"])}" '
         f'href="{html.escape(a["link"])}" target="_blank" rel="noopener">'
         f'<div class="cardhead">'
         f'{importance_badge(a["importance"])}'
@@ -385,21 +386,11 @@ def render_card(a):
     )
 
 
-def render_highlight(a):
-    rel = relative_time(a["date"])
-    meta = html.escape(a["source"]) + (f" ・ {html.escape(rel)}" if rel else "")
-    return (
-        f'<a class="hl" href="{html.escape(a["link"])}" target="_blank" rel="noopener">'
-        f'<div class="hl-head">{importance_badge(a["importance"])}{theme_tags(a["themes"])}</div>'
-        f'<div class="hl-title">{html.escape(a["title"])}</div>'
-        f'<div class="hl-meta">{meta}</div></a>'
-    )
-
-
 def render_chips(articles):
     present = [c for c in CATEGORY_STYLE if any(a["category"] == c for a in articles)]
-    chips = ['<button class="chip active" data-filter="all">すべて</button>',
-             '<button class="chip" data-filter="__imp__">🔴 重要だけ</button>']
+    # 先頭の「重要」をホーム（デフォルト表示）にする
+    chips = ['<button class="chip active" data-filter="__imp__">🏦 重要</button>',
+             '<button class="chip" data-filter="all">すべて</button>']
     for c in present:
         chips.append(f'<button class="chip" data-filter="{html.escape(c)}">{html.escape(c)}</button>')
     return "".join(chips)
@@ -445,18 +436,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     border-radius:6px;padding:1px 7px;white-space:nowrap;}
   .summary{font-size:13px;color:var(--muted);margin:6px 0 0;}
   .empty{color:var(--muted);padding:20px;text-align:center;}
-  .hlwrap{max-width:720px;margin:0 auto;padding:14px 12px 0;}
-  .hlhead{font-size:15px;font-weight:600;margin:0 0 8px;display:flex;align-items:center;gap:6px;}
-  .hlgrid{display:grid;gap:10px;}
-  .hl{display:block;text-decoration:none;color:inherit;background:#fffaf5;
-    border:1px solid #f0d9c4;border-radius:12px;padding:12px 14px;}
-  .hl:active{transform:scale(.99);}
-  .hl-head{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:5px;}
-  .hl-head .tags{margin-top:0;}
-  .hl-title{font-size:15px;font-weight:600;line-height:1.45;}
-  .hl-meta{font-size:12px;color:var(--muted);margin-top:4px;}
-  .divider{max-width:720px;margin:18px auto 0;padding:0 12px;font-size:13px;
-    font-weight:600;color:var(--muted);}
   .failed{max-width:720px;margin:16px auto;padding:0 12px;font-size:12px;color:var(--muted);}
   .failed summary{cursor:pointer;}
   footer{text-align:center;color:var(--muted);font-size:11px;margin-top:24px;}
@@ -468,42 +447,37 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div class="sub">__SUB__</div>
     <div class="chips">__CHIPS__</div>
   </header>
-  __HIGHLIGHTS__
   <main id="results">__CARDS__</main>
   __FAILED__
   <footer>RSSから自動生成 ・ タップで元記事へ</footer>
 <script>
+  const results=document.querySelector('#results');
   const chips=[...document.querySelectorAll('.chip')];
   const cards=[...document.querySelectorAll('.card')];
+  const original=[...cards];
+  function apply(f){
+    if(f==='__imp__'){
+      // ホーム：重要(高)だけを、銀行活用度の高い順に並べて表示
+      const imp=cards.filter(c=>c.dataset.imp==='高')
+                     .sort((a,b)=>(+b.dataset.score)-(+a.dataset.score));
+      const rest=original.filter(c=>!imp.includes(c));
+      [...imp,...rest].forEach(c=>results.appendChild(c));
+      cards.forEach(c=>{c.style.display=(c.dataset.imp==='高')?'':'none';});
+    }else{
+      // 他タブ：元の新しい順に戻して、分野で絞り込む
+      original.forEach(c=>results.appendChild(c));
+      cards.forEach(c=>{c.style.display=(f==='all'||c.dataset.cat===f)?'':'none';});
+    }
+  }
   chips.forEach(c=>c.addEventListener('click',()=>{
     chips.forEach(x=>x.classList.remove('active'));
     c.classList.add('active');
-    const f=c.dataset.filter;
-    cards.forEach(card=>{
-      let show = (f==='all') ? true
-        : (f==='__imp__') ? card.dataset.imp==='高'
-        : card.dataset.cat===f;
-      card.style.display = show ? '' : 'none';
-    });
+    apply(c.dataset.filter);
   }));
+  apply('__imp__');  // 最初の画面は重要ニュース
 </script>
 </body>
 </html>"""
-
-
-def render_highlights_block(articles):
-    """銀行で効く重要ニュースの上位を「ハイライト枠」として描く。"""
-    top = [a for a in sorted(articles, key=lambda x: -x["score"])
-           if a["importance"] == "高"][:8]
-    if not top:
-        return ""
-    cards = "".join(render_highlight(a) for a in top)
-    return (
-        '<div class="hlwrap">'
-        '<div class="hlhead">🏦 銀行で効くニュース</div>'
-        f'<div class="hlgrid">{cards}</div></div>'
-        '<div class="divider">すべてのニュース</div>'
-    )
 
 
 def render_html(articles, sources_ok, sources_failed):
@@ -523,7 +497,6 @@ def render_html(articles, sources_ok, sources_failed):
     return (HTML_TEMPLATE
             .replace("__SUB__", html.escape(sub))
             .replace("__CHIPS__", render_chips(articles))
-            .replace("__HIGHLIGHTS__", render_highlights_block(articles))
             .replace("__CARDS__", cards_html)
             .replace("__FAILED__", failed_note))
 
