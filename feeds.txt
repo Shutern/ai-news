@@ -43,19 +43,36 @@ Ars Technica AI|https://arstechnica.com/ai/feed/
 Wired AI|https://www.wired.com/feed/tag/ai/latest/rss
 VentureBeat AI|https://venturebeat.com/category/ai/feed/
 
-#cat:金融
-# --- 金融・SIerのAI（Googleニュース検索） ---
+#cat:国内金融
+# --- 国内の銀行・金融機関のAI（メガバンク＋先進・デジタル銀行） ---
 みずほ銀行のAI|gnews:みずほ銀行 生成AI
 三井住友銀行(SMBC)のAI|gnews:三井住友銀行 生成AI
 三菱UFJ(MUFG)のAI|gnews:三菱UFJ 生成AI
 三井住友信託(SMTB)のAI|gnews:三井住友信託 生成AI
+りそなのAI|gnews:りそな 生成AI
+GMOあおぞらネット銀行のAI|gnews:GMOあおぞらネット銀行 AI
+みんなの銀行のAI|gnews:みんなの銀行 生成AI
+ネット銀行のAI（住信SBI等）|gnews:ネット銀行 生成AI
+地方銀行のAI|gnews:地方銀行 生成AI
 銀行業界のAI導入|gnews:銀行 生成AI 導入
 NTTデータのAI|gnews:NTTデータ 生成AI
 
+#cat:海外金融
+# --- 海外の銀行・金融機関のAI（英語） ---
+海外銀行のAI活用|gnews-en:generative AI bank
+海外銀行のAI規制・導入|gnews-en:AI banking adoption regulation
+
 #cat:コンサル
-# --- コンサル・調査会社のAI（Googleニュース検索） ---
+# --- コンサル・調査会社のAI（日本語＋海外本家・銀行AI） ---
 マッキンゼーのAI|gnews:マッキンゼー 生成AI
 BCGのAI|gnews:ボストンコンサルティング 生成AI
+マッキンゼー(海外・銀行AI)|gnews-en:McKinsey AI banking
+BCG(海外・銀行AI)|gnews-en:BCG AI banking
+アクセンチュア(銀行AI)|gnews-en:Accenture AI banking
+Deloitte(銀行AI)|gnews-en:Deloitte AI banking
+PwC(銀行AI)|gnews-en:PwC AI banking
+EY(銀行AI)|gnews-en:EY AI banking
+KPMG(銀行AI)|gnews-en:KPMG AI banking
 
 #cat:研究
 # --- コミュニティ / 研究 ---

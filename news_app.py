@@ -25,7 +25,7 @@ import urllib.parse
 import urllib.request
 import zlib
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from xml.etree import ElementTree as ET
 
@@ -37,13 +37,14 @@ OUTPUT_HTML = os.path.join(OUTPUT_DIR, "index.html")
 ICON_PATH = os.path.join(OUTPUT_DIR, "icon.png")
 MANIFEST_PATH = os.path.join(OUTPUT_DIR, "manifest.json")
 
-MAX_ITEMS = 120         # 全体で表示する最大記事数
+MAX_ITEMS = 140         # 全体で表示する最大記事数
 MAX_PER_FEED = 15       # 1ソースあたりの取り込み上限
-GUARANTEED_PER_SOURCE = 4  # 各ソースから最低この件数は必ず載せる（埋没防止）
+GUARANTEED_PER_SOURCE = 3  # 各ソースから最低この件数は必ず載せる（埋没防止）
 MAX_PER_SOURCE_FINAL = 6   # 1ソースが最終一覧を占有しないための上限
 SUMMARY_CHARS = 140     # 抜粋の最大文字数
 HTTP_TIMEOUT = 15       # 1ソースの取得タイムアウト（秒）
 USER_AGENT = "Mozilla/5.0 (AI-News-Digest; personal use)"
+JST = timezone(timedelta(hours=9), "JST")  # 表示は日本時間に固定（実行環境に依存しない）
 
 # 総合ニュースソース(|filter付き)で「AI記事だけ」に絞るためのキーワード。
 # タイトルか抜粋にどれか1つでも含まれていれば AI 関連とみなす。
@@ -59,15 +60,18 @@ AI_KEYWORDS = [
 
 # 分野（カテゴリ）ごとの色バッジ。(背景色, 文字色)。feeds.txt の #cat: で指定。
 DEFAULT_CATEGORY = "その他"
+# 並び順がそのままタブ（chip）の表示順になる
 CATEGORY_STYLE = {
-    "国内":     ("#FAECE7", "#993C1D"),  # coral
+    "国内金融": ("#E1F5EE", "#0F6E56"),  # teal
+    "海外金融": ("#EAF3DE", "#3B6D11"),  # green
     "主要ラボ": ("#EEEDFE", "#3C3489"),  # purple
     "メディア": ("#E6F1FB", "#0C447C"),  # blue
-    "金融":     ("#E1F5EE", "#0F6E56"),  # teal
     "コンサル": ("#FAEEDA", "#854F0B"),  # amber
+    "国内":     ("#FAECE7", "#993C1D"),  # coral
     "研究":     ("#F1EFE8", "#444441"),  # gray
     DEFAULT_CATEGORY: ("#F1EFE8", "#444441"),
 }
+FINANCE_CATEGORIES = {"国内金融", "海外金融"}  # 金融ソースの加点対象
 
 
 # ---- フィードの読み込み ------------------------------------------------
@@ -90,16 +94,20 @@ def load_feeds(path):
             needs_filter = len(parts) > 2 and parts[2].lower() == "filter"
             if len(parts) == 1:        # 表示名なし・URLのみの行
                 name, url = None, parts[0]
-            # "gnews:キーワード" は Googleニュース検索RSS に展開する
-            if url.startswith("gnews:"):
+            # "gnews:キーワード"＝日本語検索、"gnews-en:キーワード"＝英語(海外)検索
+            if url.startswith("gnews-en:"):
+                url = google_news_url(url[len("gnews-en:"):].strip(), lang="en")
+            elif url.startswith("gnews:"):
                 url = google_news_url(url[len("gnews:"):].strip())
             feeds.append((name, url, needs_filter, category))
     return feeds
 
 
-def google_news_url(query):
-    """検索キーワードから Googleニュースの日本語RSS URL を組み立てる。"""
+def google_news_url(query, lang="ja"):
+    """検索キーワードから Googleニュースの検索RSS URL を組み立てる。"""
     q = urllib.parse.quote(query)
+    if lang == "en":
+        return f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
     return f"https://news.google.com/rss/search?q={q}&hl=ja&gl=JP&ceid=JP:ja"
 
 
@@ -159,7 +167,7 @@ def relative_time(dt):
     days = hours / 24
     if days < 7:
         return f"{int(days)}日前"
-    return dt.astimezone().strftime("%Y/%m/%d")
+    return dt.astimezone(JST).strftime("%Y/%m/%d")
 
 
 # ---- フィードの取得・解析 ----------------------------------------------
@@ -267,13 +275,19 @@ def make_summary(title, raw_summary):
 # 銀行業務に直結するテーマ。マッチするとタグ表示にも使う。
 BANK_THEMES = {
     "業務効率化": ["業務効率", "バックオフィス", "議事録", "文字起こし", "コールセンター",
-        "問い合わせ", "エージェント", "自動化", "rpa", "内製", "効率化", "省力化"],
+        "問い合わせ", "エージェント", "自動化", "rpa", "内製", "効率化", "省力化",
+        "agent", "agents", "automation", "back office", "back-office", "productivity",
+        "contact center", "call center", "customer care"],
     "リスク・不正": ["不正検知", "不正利用", "マネロン", "aml", "kyc", "本人確認",
-        "リスク管理", "与信", "審査", "詐欺", "なりすまし"],
-    "コンプラ・規制": ["規制", "金融庁", "コンプライアンス", "ガバナンス", "監査", "法規制"],
-    "営業・提案": ["営業支援", "提案書", "顧客対応", "パーソナライズ", "レコメンド", "渉外"],
+        "リスク管理", "与信", "審査", "詐欺", "なりすまし",
+        "fraud", "scam", "risk management", "underwriting"],
+    "コンプラ・規制": ["規制", "金融庁", "コンプライアンス", "ガバナンス", "監査", "法規制",
+        "regulation", "regulatory", "compliance", "governance"],
+    "営業・提案": ["営業支援", "提案書", "顧客対応", "パーソナライズ", "レコメンド", "渉外",
+        "personalization", "advisory"],
     "セキュリティ": ["セキュリティ", "サイバー", "個人情報", "プライバシー", "オンプレ",
-        "セキュア", "情報漏えい", "情報漏洩", "データ主権"],
+        "セキュア", "情報漏えい", "情報漏洩", "データ主権",
+        "cybersecurity", "security", "privacy"],
     "文書・ナレッジ": ["契約書", "稟議", "ocr", "rag", "社内文書", "ナレッジ", "文書検索",
         "マニュアル"],
     "基盤モデル": ["gpt-5", "gpt5", "claude", "gemini", "新モデル", "大規模言語モデル", "llm"],
@@ -281,6 +295,11 @@ BANK_THEMES = {
 THEME_WEIGHT = {"基盤モデル": 1}  # 既定は2、基盤モデルだけ控えめ
 DEFAULT_THEME_WEIGHT = 2
 FINANCE_SOURCE_BONUS = 4         # 金融カテゴリのソースは無条件で加点
+
+# 銀行・金融機関の話題か（日英）。該当すれば活用度を加点＝海外の銀行AIも拾える
+BANK_DOMAIN = ["銀行", "メガバンク", "信託", "信用金庫", "金融機関", "保険", "証券",
+    "bank", "banking", "lender", "financial institution", "fintech"]
+BANK_DOMAIN_BONUS = 3
 
 # 一般的な重要語（大ニュースの兆候）
 GENERAL_KW = ["発表", "提携", "買収", "資金調達", "兆円", "億円", "国内初", "初の", "導入"]
@@ -325,8 +344,10 @@ def annotate_importance(articles):
             if any(_kw_in(t, kw) for kw in kws):
                 themes.append(theme)
                 bank += THEME_WEIGHT.get(theme, DEFAULT_THEME_WEIGHT)
-        if a["category"] == "金融":
+        if a["category"] in FINANCE_CATEGORIES:
             bank += FINANCE_SOURCE_BONUS
+        if any(_kw_in(t, k) for k in BANK_DOMAIN):
+            bank += BANK_DOMAIN_BONUS  # 銀行・金融機関の話題（海外含む）
         # 一般重要度
         gen = sum(1 for kw in GENERAL_KW if _kw_in(t, kw))
         gen += TIER_BONUS.get(a["category"], 0)
@@ -378,9 +399,10 @@ def render_card(a):
         f'<p class="summary">{html.escape(a["summary"])}</p>' if a["summary"] else ""
     )
     cat = html.escape(a["category"])
+    ts = int(a["date"].timestamp()) if a["date"] else 0
     return (
         f'<a class="card" data-cat="{cat}" data-imp="{a["importance"]}" '
-        f'data-score="{round(a["score"])}" '
+        f'data-score="{round(a["score"])}" data-ts="{ts}" '
         f'href="{html.escape(a["link"])}" target="_blank" rel="noopener">'
         f'<div class="cardhead">'
         f'{importance_badge(a["importance"])}'
@@ -469,9 +491,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   const original=[...cards];
   function apply(f){
     if(f==='__imp__'){
-      // ホーム：重要(高)だけを、銀行活用度の高い順に並べて表示
+      // ホーム：重要(高)だけを、新しい順（日付降順）で表示
       const imp=cards.filter(c=>c.dataset.imp==='高')
-                     .sort((a,b)=>(+b.dataset.score)-(+a.dataset.score));
+                     .sort((a,b)=>(+b.dataset.ts)-(+a.dataset.ts));
       const rest=original.filter(c=>!imp.includes(c));
       [...imp,...rest].forEach(c=>results.appendChild(c));
       cards.forEach(c=>{c.style.display=(c.dataset.imp==='高')?'':'none';});
@@ -493,7 +515,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
 
 def render_html(articles, sources_ok, sources_failed):
-    generated = datetime.now().astimezone().strftime("%Y/%m/%d %H:%M")
+    generated = datetime.now(JST).strftime("%Y/%m/%d %H:%M")
     cards_html = ("\n".join(render_card(a) for a in articles) if articles
                   else '<p class="empty">記事を取得できませんでした。'
                        'feeds.txt とネット接続を確認してください。</p>')
